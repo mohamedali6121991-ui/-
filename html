@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>محلل سلاسل الإمداد المتقدم</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --primary: #1a252f; --secondary: #2c3e50; --accent: #27ae60; --danger: #c0392b; --info: #2980b9; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1300px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        h1 { color: var(--primary); text-align: center; margin-bottom: 30px; font-weight: 700; }
+        
+        .upload-section { border: 2px dashed var(--info); padding: 30px; border-radius: 12px; background: #f8fbff; text-align: center; margin-bottom: 30px; transition: 0.3s; }
+        .upload-section:hover { background: #eff6ff; border-color: var(--accent); }
+
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 30px; }
+        .stat-card { padding: 20px; border-radius: 10px; color: white; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .bg-primary { background: var(--primary); }
+        .bg-success { background: var(--accent); }
+        .bg-danger { background: var(--danger); }
+        .bg-info { background: var(--info); }
+
+        .charts-wrapper { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
+        .chart-box { background: #fff; border: 1px solid #eee; padding: 15px; border-radius: 10px; min-height: 300px; }
+
+        .table-container { overflow-x: auto; margin-top: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { padding: 15px; text-align: center; border-bottom: 1px solid #eee; }
+        th { background: var(--secondary); color: white; font-weight: 600; }
+        tr:hover { background-color: #f9f9f9; }
+        .saving-positive { color: var(--accent); font-weight: bold; }
+        .saving-negative { color: var(--danger); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>لوحة التحكم الاستراتيجية لسلاسل الإمداد</h1>
+    
+    <div class="upload-section" onclick="document.getElementById('fileInput').click()">
+        <h3>📁 اسحب ملف البيانات (Excel) أو اضغط هنا</h3>
+        <p>تأكد أن الملف يحتوي على: (بلد المنشأ، التكلفة التقديرية، التكلفة الفعلية، الخط الملاحي)</p>
+        <input type="file" id="fileInput" hidden accept=".xlsx, .xls">
+    </div>
+
+    <div id="dashboard" style="display: none;">
+        <div class="stats-grid">
+            <div class="stat-card bg-primary">
+                <h4>عدد الشحنات</h4>
+                <h2 id="totalCount">0</h2>
+            </div>
+            <div class="stat-card bg-success">
+                <h4>إجمالي التوفير المحقق</h4>
+                <h2 id="totalSavings">$0</h2>
+            </div>
+            <div class="stat-card bg-info">
+                <h4>متوسط نسبة التوفير</h4>
+                <h2 id="avgSavingsRate">0%</h2>
+            </div>
+            <div class="stat-card bg-danger">
+                <h4>شحنات متجاوزة للميزانية</h4>
+                <h2 id="overBudgetCount">0</h2>
+            </div>
+        </div>
+
+        <div class="charts-wrapper">
+            <div class="chart-box">
+                <canvas id="originChart"></canvas>
+            </div>
+            <div class="chart-box">
+                <canvas id="costComparisonChart"></canvas>
+            </div>
+        </div>
+
+        <h3>قائمة تحليل الشحنات التفصيلي</h3>
+        <div class="table-container">
+            <table id="analysisTable">
+                <thead>
+                    <tr>
+                        <th>رقم الشحنة</th>
+                        <th>بلد المنشأ</th>
+                        <th>الخط الملاحي</th>
+                        <th>التكلفة الفعلية</th>
+                        <th>التوفير/العجز</th>
+                        <th>نسبة التوفير</th>
+                        <th>الحالة</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.getElementById('fileInput').addEventListener('change', function(e) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const data = event.target.result;
+            const workbook = XLSX.read(data, { type: 'binary' });
+            const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+            processSupplyChainData(json);
+        };
+        reader.readAsBinaryString(e.target.files[0]);
+    });
+
+    let originChartInstance = null;
+    let costChartInstance = null;
+
+    function processSupplyChainData(data) {
+        let totalSavings = 0;
+        let overBudgetCount = 0;
+        let savingsRates = [];
+        let originCounts = {};
+        const tbody = document.querySelector("#analysisTable tbody");
+        tbody.innerHTML = "";
+
+        data.forEach(item => {
+            const id = item['رقم الشحنة'] || 'N/A';
+            const origin = item['بلد المنشأ'] || 'غير معروف';
+            const line = item['الخط الملاحي'] || 'N/A';
+            const budgeted = parseFloat(item['التكلفة التقديرية'] || 0);
+            const actual = parseFloat(item['التكلفة الفعلية'] || 0);
+            
+            const saving = budgeted - actual;
+            const savingRate = budgeted !== 0 ? (saving / budgeted) * 100 : 0;
+            
+            totalSavings += saving;
+            if (saving < 0) overBudgetCount++;
+            savingsRates.push(savingRate);
+            originCounts[origin] = (originCounts[origin] || 0) + 1;
+
+            const row = tbody.insertRow();
+            row.innerHTML = `
+                <td>${id}</td>
+                <td>${origin}</td>
+                <td>${line}</td>
+                <td>$${actual.toLocaleString()}</td>
+                <td class="${saving >= 0 ? 'saving-positive' : 'saving-negative'}">$${saving.toLocaleString()}</td>
+                <td>${savingRate.toFixed(1)}%</td>
+                <td>${saving >= 0 ? '✅ ضمن الميزانية' : '⚠️ تجاوز'}</td>
+            `;
+        });
+
+        document.getElementById('totalCount').innerText = data.length;
+        document.getElementById('totalSavings').innerText = `$${totalSavings.toLocaleString()}`;
+        document.getElementById('avgSavingsRate').innerText = (savingsRates.reduce((a,b)=>a+b,0)/data.length).toFixed(1) + "%";
+        document.getElementById('overBudgetCount').innerText = overBudgetCount;
+        
+        document.getElementById('dashboard').style.display = 'block';
+        updateCharts(originCounts, data);
+    }
+
+    function updateCharts(originData, fullData) {
+        if (originChartInstance) originChartInstance.destroy();
+        if (costChartInstance) costChartInstance.destroy();
+
+        // رسم بياني لبلد المنشأ
+        originChartInstance = new Chart(document.getElementById('originChart'), {
+            type: 'pie',
+            data: {
+                labels: Object.keys(originData),
+                datasets: [{
+                    data: Object.values(originData),
+                    backgroundColor: ['#1abc9c', '#3498db', '#9b59b6', '#f1c40f', '#e67e22']
+                }]
+            },
+            options: { plugins: { title: { display: true, text: 'توزيع الشحنات حسب بلد المنشأ' } } }
+        });
+
+        // رسم بياني للمقارنة المالية (أول 5 شحنات كمثال)
+        const sampleData = fullData.slice(0, 5);
+        costChartInstance = new Chart(document.getElementById('costComparisonChart'), {
+            type: 'bar',
+            data: {
+                labels: sampleData.map(d => d['رقم الشحنة'] || 'شحنة'),
+                datasets: [
+                    { label: 'التكلفة التقديرية', data: sampleData.map(d => d['التكلفة التقديرية']), backgroundColor: '#bdc3c7' },
+                    { label: 'التكلفة الفعلية', data: sampleData.map(d => d['التكلفة الفعلية']), backgroundColor: '#3498db' }
+                ]
+            },
+            options: { 
+                plugins: { title: { display: true, text: 'مقارنة التكلفة التقديرية مقابل الفعلية' } },
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    }
+</script>
+</body>
+</html>
